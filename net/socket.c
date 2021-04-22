@@ -40,7 +40,8 @@ typedef struct NetSocketState {
     int fd;
     SocketReadState rs;
     unsigned int send_index;      /* number of bytes sent (only SOCK_STREAM) */
-    struct sockaddr_in dgram_dst; /* contains inet host and port destination iff connectionless (SOCK_DGRAM) */
+    struct sockaddr_in dgram_dst; /* contains inet host and port destination if connectionless (SOCK_DGRAM) */
+    struct sockaddr_un unix_dst;  /* contains the UDS pathname if using Unix Domain sockets */
     IOHandler *send_fn;           /* differs between SOCK_STREAM/SOCK_DGRAM */
     bool read_poll;               /* waiting to receive data? */
     bool write_poll;              /* waiting to transmit data? */
@@ -118,13 +119,20 @@ static ssize_t net_socket_receive_dgram(NetClientState *nc, const uint8_t *buf, 
     NetSocketState *s = DO_UPCAST(NetSocketState, nc, nc);
     ssize_t ret;
 
+    // fprintf(stderr, "### net_socket_receive_dgram1 family %d\n", (int)s->dgram_dst.sin_family);
+
     do {
         if (s->dgram_dst.sin_family != AF_UNIX) {
             ret = qemu_sendto(s->fd, buf, size, 0,
                               (struct sockaddr *)&s->dgram_dst,
                               sizeof(s->dgram_dst));
+            // fprintf(stderr, "### net_socket_receive_dgram1 %zu\n", size);
         } else {
-            ret = send(s->fd, buf, size, 0);
+            // fprintf(stderr, "### net_socket_receive_dgram2 %zu\n", size);
+            // ret = send(s->fd, buf, size, 0);
+            ret = qemu_sendto(s->fd, buf, size, 0,
+                              (struct sockaddr *)&s->unix_dst,
+                              sizeof(s->unix_dst));
         }
     } while (ret == -1 && errno == EINTR);
 
@@ -348,6 +356,7 @@ static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
         return NULL;
     }
     sa_type = sa->type;
+    // fprintf(stderr, "#### net_socket_fd_init_dgram %d\n", sa_type);
     qapi_free_SocketAddress(sa);
 
     /* fd passed: multicast: "learn" dgram_dst address from bound address and save it
@@ -395,6 +404,9 @@ static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
         if (sa_type == SOCKET_ADDRESS_TYPE_UNIX) {
             s->dgram_dst.sin_family = AF_UNIX;
         }
+        // if (sa_type == SOCKET_ADDRESS_TYPE_UNIX) {
+        //     s->unix_dst.sun_family = AF_UNIX;
+        // }
 
         snprintf(nc->info_str, sizeof(nc->info_str),
                  "socket: fd=%d %s", fd, SocketAddressType_str(sa_type));
@@ -463,6 +475,7 @@ static NetSocketState *net_socket_fd_init(NetClientState *peer,
         closesocket(fd);
         return NULL;
     }
+    // fprintf(stderr, "#### net_socket_fd_init %d\n", so_type);
     switch(so_type) {
     case SOCK_DGRAM:
         return net_socket_fd_init_dgram(peer, model, name, fd, is_connected,
@@ -650,6 +663,70 @@ static int net_socket_mcast_init(NetClientState *peer,
 
 }
 
+static int net_socket_unix_init(NetClientState *peer,
+                                 const char *model,
+                                 const char *name,
+                                 const char *unix_paths,
+                                 Error **errp)
+{
+    NetSocketState *s;
+    int fd, ret;
+    struct sockaddr_un from_addr, to_addr;
+
+    from_addr.sun_family = AF_UNIX;
+    to_addr.sun_family = AF_UNIX;
+
+    ret = parse_uds_path_pair(&from_addr, &to_addr, unix_paths, errp);
+    if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "### tbd uds_path_pair result");
+        return -1;
+    }
+
+    if (unlink(to_addr.sun_path) < 0 && errno != ENOENT) {
+        error_setg_errno(errp, errno,
+                         "Failed to unlink socket %s", to_addr.sun_path);
+        return -1;
+    }
+
+    fd = qemu_socket(PF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "can't create unix datagram socket");
+        return -1;
+    }
+
+    ret = socket_set_fast_reuse(fd);
+    if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "can't set socket option SO_REUSEADDR");
+        closesocket(fd);
+        return -1;
+    }
+    ret = bind(fd, (struct sockaddr *)&to_addr, sizeof(to_addr));
+    if (ret < 0) {
+        error_setg_errno(errp, errno, "can't bind \"%s\" to unix domain socket",
+                         to_addr.sun_path);
+        closesocket(fd);
+        return -1;
+    }
+    qemu_set_nonblock(fd);
+
+    // fprintf(stderr, "#### net_socket_unix_init\n");
+
+    s = net_socket_fd_init(peer, model, name, fd, 0, NULL, errp);
+    if (!s) {
+        return -1;
+    }
+
+    s->unix_dst = from_addr;
+
+    // fprintf(stderr, "#### net_socket_unix_init2\n");
+
+    snprintf(s->nc.info_str, sizeof(s->nc.info_str),
+             "socket: unix=%s:%s", to_addr.sun_path, from_addr.sun_path);
+    return 0;
+}
+
 static int net_socket_udp_init(NetClientState *peer,
                                  const char *model,
                                  const char *name,
@@ -660,6 +737,9 @@ static int net_socket_udp_init(NetClientState *peer,
     NetSocketState *s;
     int fd, ret;
     struct sockaddr_in laddr, raddr;
+
+    // fprintf(stderr, "#### net_socket_udp_init %s\n", lhost);  // --> 10456
+    // fprintf(stderr, "#### net_socket_udp_init %s\n", rhost);  // --> 10123
 
     if (parse_host_port(&laddr, lhost, errp) < 0) {
         return -1;
@@ -713,8 +793,8 @@ int net_init_socket(const Netdev *netdev, const char *name,
     sock = &netdev->u.socket;
 
     if (sock->has_fd + sock->has_listen + sock->has_connect + sock->has_mcast +
-        sock->has_udp != 1) {
-        error_setg(errp, "exactly one of listen=, connect=, mcast= or udp="
+        sock->has_udp + sock->has_q_unix != 1) {
+        error_setg(errp, "exactly one of listen=, connect=, mcast=, udp= or unix="
                    " is required");
         return -1;
     }
@@ -765,6 +845,16 @@ int net_init_socket(const Netdev *netdev, const char *name,
          * zero" */
         if (net_socket_mcast_init(peer, "socket", name, sock->mcast,
                                   sock->localaddr, errp) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (sock->has_q_unix) {
+        // fprintf(stderr, "unix %s\n", sock->q_unix);
+    
+        if (net_socket_unix_init(peer, "socket", name, sock->q_unix,
+                                 errp) < 0) {
             return -1;
         }
         return 0;

@@ -46,6 +46,10 @@ int socket_listen(SocketAddress *addr, int num, Error **errp);
 void socket_listen_cleanup(int fd, Error **errp);
 int socket_dgram(SocketAddress *remote, SocketAddress *local, Error **errp);
 
+int parse_uds_path_pair(struct sockaddr_un *spath, struct sockaddr_un *dpath, const char *str,
+                    Error **errp);
+
+
 /* Old, ipv4 only bits.  Don't use for new code. */
 int parse_host_port(struct sockaddr_in *saddr, const char *str,
                     Error **errp);

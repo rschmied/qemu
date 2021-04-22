@@ -2522,6 +2522,11 @@ DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
     "-netdev socket,id=str[,fd=h][,udp=host:port][,localaddr=host:port]\n"
     "                configure a network backend to connect to another network\n"
     "                using an UDP tunnel\n"
+#ifndef _WIN32
+    "-netdev socket,id=str[,fd=h][,unix=path_from:path_to]\n"
+    "                configure a network backend to connect to another network\n"
+    "                using a Unix domain socket\n"
+#endif
 #ifdef CONFIG_VDE
     "-netdev vde,id=str[,sock=socketpath][,port=n][,group=groupname][,mode=octalmode]\n"
     "                configure a network backend to connect to port 'n' of a vde switch\n"

@@ -121,6 +121,28 @@ out:
     return ret;
 }
 
+int parse_uds_path_pair(struct sockaddr_un *spath, struct sockaddr_un *dpath, const char *str,
+                    Error **errp)
+{
+    gchar **substrings;
+    int ret = 0;
+
+    substrings = g_strsplit(str, ":", 2);
+    if (!substrings || !substrings[0] || !substrings[1]) {
+        error_setg(errp, "unix domain socket path pair '%s' doesn't contain ':' "
+                   "separating path1 from path2", str);
+        ret = -1;
+        goto out;
+    }
+
+    strncpy(spath->sun_path, substrings[0], sizeof(spath->sun_path) - 1);
+    strncpy(dpath->sun_path, substrings[1], sizeof(dpath->sun_path) - 1);
+
+out:
+    g_strfreev(substrings);
+    return ret;
+}
+
 char *qemu_mac_strdup_printf(const uint8_t *macaddr)
 {
     return g_strdup_printf("%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",

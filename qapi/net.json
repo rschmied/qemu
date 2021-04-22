@@ -268,6 +268,9 @@
 #
 # @udp: UDP unicast address and port number
 #
+# @unix: Unix Domain socket filenames from/to separated by a colon
+#
+#
 # Since: 1.2
 ##
 { 'struct': 'NetdevSocketOptions',
@@ -277,6 +280,7 @@
     '*connect':   'str',
     '*mcast':     'str',
     '*localaddr': 'str',
+    '*unix':      'str',
     '*udp':       'str' } }
 
 ##
